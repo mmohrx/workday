@@ -1,23 +1,30 @@
 import { atom, read, update } from 'claude-code'
-import type { Register, RenderChildren } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Item, Section, Snapshot } from '../types'
 
+type Engine = EngineInterface
+
 const PANE = 'today'
 const TOOL = 'update_today'
-const EMPTY: Snapshot = { events: [], tasks: [], alerts: [], updatedAt: '' }
+const EMPTY: Snapshot = { events: [], tasks: [], alerts: [] }
 const SECTIONS: readonly Section[] = ['workday', 'timeline', 'focus', 'heads-up']
 const STORE_HIDDEN = 'hidden-sections'
 const STORE_ON = 'open-on-start'
 const STORE_LAST = 'last-snapshot'
+const DEFAULT_START = 9 * 60
+const DEFAULT_END = 18 * 60
 
 type Colors = { accent: string; events: string; tasks: string; alerts: string; ok: string }
-type Palette = 'theme' | 'pastel' | 'mono'
+type Palette = 'calm' | 'nordic' | 'warm' | 'theme' | 'mono'
 
-// `theme` uses theme keys, so the pane follows the user's light or dark theme.
+// Fixed palettes use mid tones that read on light and dark backgrounds, also as label backgrounds.
+// `theme` and `mono` use theme keys, so they follow the user's Claude Code theme.
 const PALETTES: Record<Palette, Colors> = {
+  calm: { accent: '#14b8a6', events: '#818cf8', tasks: '#fbbf24', alerts: '#f87171', ok: '#4ade80' },
+  nordic: { accent: '#88c0d0', events: '#81a1c1', tasks: '#b48ead', alerts: '#d08770', ok: '#a3be8c' },
+  warm: { accent: '#eab308', events: '#84cc16', tasks: '#c084fc', alerts: '#f97316', ok: '#10b981' },
   theme: { accent: 'claude', events: 'suggestion', tasks: 'merged', alerts: 'error', ok: 'success' },
-  pastel: { accent: '#fdba74', events: '#93c5fd', tasks: '#c4b5fd', alerts: '#fca5a5', ok: '#86efac' },
   mono: { accent: 'text', events: 'text', tasks: 'text', alerts: 'warning', ok: 'inactive' },
 }
 
@@ -34,7 +41,7 @@ function colorOf(v: unknown): string | undefined {
 }
 
 const snapshot = atom({ plugin: 'workday', key: 'snapshot' } as const, EMPTY, {
-  shape: 'snapshot-3',
+  shape: 'snapshot-4',
 })
 const hidden = atom({ plugin: 'workday', key: 'hidden' } as const, [] as Section[], {
   shape: 'hidden-1',
@@ -55,25 +62,42 @@ const itemList = {
   },
 }
 
+const listLinks = {
+  type: 'array',
+  description: 'Per tracker in tasks: a link that lists my open items there (a saved filter or search)',
+  items: {
+    type: 'object',
+    properties: {
+      source: { type: 'string', description: 'Same name as in the tasks, e.g. Jira' },
+      url: { type: 'string', description: 'https link to my open items in that tool' },
+    },
+    required: ['source', 'url'],
+  },
+}
+
 const LANGUAGE =
   'Write in the language the user normally uses with you in this session (e.g. German if they write German).'
 
 const sourcesHint = (sources: string) => (sources ? `Preferred sources: ${sources}.` : '')
 
-function todayPrompt(sources: string, maxTasks: number, maxAlerts: number): string {
+function todayPrompt(sources: string, maxTasks: number, maxAlerts: number, isPaneShown: boolean): string {
   return [
     'Refresh my Today pane.',
     'Use whatever tools are connected in this session to find what is on my plate today:',
     '- Calendar: my events today, sorted by start time',
-    `- Ticket or task tracker: open items assigned to me, most important first (at most ${maxTasks})`,
-    `- Monitoring or error tracking: what is on fire right now (open alerts, new errors)`,
-    `At most ${maxAlerts * 2} heads-up items in total, most urgent first.`,
+    `- Ticket or task trackers, every one that is connected: open items assigned to me, merged into one list, most important first (at most ${maxTasks})`,
+    '- Monitoring or error tracking: what is on fire right now (open alerts, new errors)',
     '- Inbox and code review: only things where someone waits for me (a question, a requested change, a review). Skip pure notifications such as "merged" or "pushed".',
+    `Monitoring, inbox and code review together go into heads-up: at most ${maxAlerts * 2} items, most urgent first.`,
     'Give every item its key (`id`) and a `url` that opens it, wherever the tool returns one.',
+    'For each tracker in tasks, add to `lists` a link that shows my open items there (a saved filter or search URL), if the tool can build one.',
     'Skip any source that is not connected, without asking. Read only, change nothing.',
     sourcesHint(sources),
     LANGUAGE,
-    `Then call mcp__workday__${TOOL} with the result and reply in chat with a single line.`,
+    `Then call mcp__workday__${TOOL} with the result.`,
+    isPaneShown
+      ? 'Reply in chat with a single line.'
+      : 'The pane cannot be shown here (an IDE, or a narrow terminal), so also list the result in chat: short, grouped by events, tasks and heads-up, with links.',
   ]
     .filter(Boolean)
     .join('\n')
@@ -85,7 +109,7 @@ function wrapupPrompt(sources: string, note: string): string {
     'Sources, as available:',
     '- this session: what we worked on',
     '- git: `git log --since=midnight --author="$(git config user.email)"` in the repositories under the working directory',
-    '- ticket or task tracker: what I closed, moved or commented on today',
+    '- ticket or task trackers, every one that is connected: what I closed, moved or commented on today',
     '- calendar: my events today',
     sourcesHint(sources),
     note ? `My note: ${note}` : '',
@@ -103,16 +127,21 @@ const fmt = (min: number) => {
   const m = ((min % 1440) + 1440) % 1440
   return `${pad(Math.floor(m / 60))}:${pad(m % 60)}`
 }
+/** "1h 5m" or "25m". */
+const until = (min: number) => (min >= 60 ? `${Math.floor(min / 60)}h ${min % 60}m` : `${min}m`)
 
-// Segmented bar, as claude-flightdeck draws its gauges.
-function gauge(pct: number, width: number) {
-  const full = Math.max(0, Math.min(width, Math.round((pct / 100) * width)))
-  return { on: '▰'.repeat(full), off: '▱'.repeat(width - full) }
+/** A progress line: the done part heavy, the rest thin. */
+function bar(pct: number, width: number) {
+  const done = Math.round((Math.min(100, Math.max(0, pct)) * width) / 100)
+  return ['━'.repeat(done), '─'.repeat(width - done)] as const
 }
 
 function minutes(hhmm: string | undefined): number | undefined {
   const m = /^(\d{1,2}):(\d{2})/.exec(hhmm ?? '')
-  return m ? Number(m[1]) * 60 + Number(m[2]) : undefined
+  if (!m) return undefined
+  const h = Number(m[1])
+  const min = Number(m[2])
+  return h < 24 && min < 60 ? h * 60 + min : undefined
 }
 
 /** Local date as YYYY-MM-DD: the last snapshot is shown again only on the day it was taken. */
@@ -126,47 +155,132 @@ const nowMinutes = () => {
   return d.getHours() * 60 + d.getMinutes()
 }
 
+const DATE = new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+
+// Greetings follow the system language, like the date; anything without a table here gets English.
+const GREETINGS: Record<string, readonly [night: string, morning: string, noon: string, afternoon: string, evening: string]> = {
+  en: ['Still up', 'Good morning', 'Hello', 'Good afternoon', 'Good evening'],
+  de: ['Noch wach', 'Guten Morgen', 'Mahlzeit', 'Guten Tag', 'Guten Abend'],
+}
+const LANG = DATE.resolvedOptions().locale.slice(0, 2)
+const WORDS = GREETINGS[LANG] ?? GREETINGS.en!
+
+/** "Good morning" by the time of day; late at night "Still up?". */
+function greeting(min: number): string {
+  const h = Math.floor(min / 60)
+  const [night, morning, noon, afternoon, evening] = WORDS
+  const word = h < 5 ? night : h < 11 ? morning : h < 14 ? noon : h < 18 ? afternoon : h < 23 ? evening : night
+  const end = word === night ? '?' : ''
+  return `${word}${end}`
+}
+
+const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+/** Links are https only; anything else is dropped. */
+const httpsUrl = (v: unknown) => (typeof v === 'string' && /^https:\/\//.test(v) ? v : undefined)
+
+/** Cleans what Claude (or the store) hands over. Each item's start time is parsed here, once. */
 function toItems(value: unknown): Item[] {
   if (!Array.isArray(value)) return []
-  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
   return value
     .filter(x => x && typeof x.text === 'string')
-    .map(x => ({
-      text: String(x.text),
-      id: str(x.id),
-      time: str(x.time),
-      source: str(x.source),
-      url: /^https:\/\//.test(String(x.url ?? '')) ? String(x.url) : undefined,
-    }))
+    .map(x => {
+      const time = str(x.time)
+      return {
+        text: String(x.text),
+        id: str(x.id),
+        time,
+        start: minutes(time),
+        source: str(x.source),
+        url: httpsUrl(x.url),
+      }
+    })
+}
+
+/** Links to a tracker's list of open items, keyed by the source name; https only. */
+function toLists(value: unknown): { source: string; url: string }[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap(x => {
+    const source = str(x?.source)
+    const url = httpsUrl(x?.url)
+    return source && url ? [{ source, url }] : []
+  })
+}
+
+/** The one way into the pane's state: items cleaned, events by start time, all-day ones last. */
+function normalize(raw: Record<string, unknown>, isDemo?: true): Snapshot {
+  const events = toItems(raw.events).sort((a, b) => (a.start ?? Infinity) - (b.start ?? Infinity))
+  return {
+    events,
+    tasks: toItems(raw.tasks),
+    alerts: toItems(raw.alerts),
+    lists: toLists(raw.lists),
+    takenAt: Date.now(),
+    ...(isDemo ? { isDemo } : {}),
+  }
 }
 
 /** Sample data that shows every state of the pane: past, next and later events, overflow, links, alerts. */
 function demoSnapshot(): Snapshot {
   const t = nowMinutes()
-  const updatedAt = fmt(t)
   const url = (path: string) => `https://example.com/${path}`
-  return {
-    events: [
-      { time: fmt(t - 150), text: 'Daily standup', source: 'Calendar', url: url('event/1') },
-      { time: fmt(t - 60), text: 'Design review: checkout flow', source: 'Calendar' },
-      { time: fmt(t + 25), text: '1:1 with team lead', source: 'Calendar', url: url('event/3') },
-      { time: fmt(t + 120), text: 'Customer call – rollout plan for the new pricing pages', source: 'Calendar' },
-    ],
-    tasks: [
-      { id: 'ABC-101', text: 'Fix login redirect loop', source: 'Tracker', url: url('ABC-101') },
-      { id: 'ABC-87', text: 'Write migration guide for v2 API', source: 'Tracker', url: url('ABC-87') },
-      { id: 'OPS-7', text: 'Rotate staging certificates', source: 'Tracker' },
-      { id: 'ABC-120', text: 'Clean up feature flags', source: 'Tracker', url: url('ABC-120') },
-      { id: 'ABC-121', text: 'Update onboarding docs', source: 'Tracker' },
-    ],
-    alerts: [
-      { id: 'web#412', text: 'Review requested: new pricing page', source: 'Code review', url: url('pr/412') },
-      { id: 'API-5XX', text: 'Error rate above 2 % on /checkout', source: 'Monitoring', url: url('alert/9') },
-      { text: '3 dependency updates waiting for review', source: 'Code review', url: url('deps') },
-    ],
-    updatedAt,
-    isDemo: true,
-  }
+  // Offsets stay inside the day, so the demo makes sense at 00:30 and at 23:30 alike.
+  const at = (offset: number) => fmt(Math.min(1439, Math.max(0, t + offset)))
+  return normalize(
+    {
+      events: [
+        { time: at(-150), text: 'Daily standup', source: 'Calendar', url: url('event/1') },
+        { time: at(-60), text: 'Design review: checkout flow', source: 'Calendar' },
+        { time: at(+25), text: '1:1 with team lead', source: 'Calendar', url: url('event/3') },
+        { time: at(+120), text: 'Customer call – rollout plan for the new pricing pages', source: 'Calendar' },
+        { text: 'Out of office: Sam', source: 'Calendar' },
+      ],
+      tasks: [
+        { id: 'ABC-101', text: 'Fix login redirect loop', source: 'Tracker', url: url('ABC-101') },
+        { id: 'ABC-87', text: 'Write migration guide for v2 API', source: 'Tracker', url: url('ABC-87') },
+        { id: 'OPS-7', text: 'Rotate staging certificates', source: 'Tracker' },
+        { id: 'ABC-120', text: 'Clean up feature flags', source: 'Tracker', url: url('ABC-120') },
+        { id: 'ABC-121', text: 'Update onboarding docs', source: 'Tracker' },
+      ],
+      lists: [{ source: 'Tracker', url: url('my-issues') }],
+      alerts: [
+        { id: 'web#412', text: 'Review requested: new pricing page', source: 'Code review', url: url('pr/412') },
+        { id: 'API-5XX', text: 'Error rate above 2 % on /checkout', source: 'Monitoring', url: url('alert/9') },
+        { text: '3 dependency updates waiting for review', source: 'Code review', url: url('deps') },
+      ],
+    },
+    true,
+  )
+}
+
+const openPane = ($: Engine) => $.ui.open({ id: PANE, title: 'Today' })
+
+/** Today's last real snapshot from the store, or undefined when it is from another day. */
+async function loadLast($: Engine): Promise<Snapshot | undefined> {
+  const last = (await $.store.get(STORE_LAST)) as { date?: string; snapshot?: Snapshot } | undefined
+  // A snapshot stored by an older version has no takenAt; it is dropped, /today gets a new one.
+  if (last?.date !== todayKey() || !last.snapshot?.takenAt) return undefined
+  return { ...normalize(last.snapshot), takenAt: last.snapshot.takenAt }
+}
+
+/** Minutes since the data was taken, across midnight too; undefined when there is no data. */
+function ageOf(s: Snapshot): number | undefined {
+  return s.takenAt ? Math.max(0, Math.floor((Date.now() - s.takenAt) / 60_000)) : undefined
+}
+
+/**
+ * Whether auto-refresh should ask now: during the workday, with the pane on screen, no demo
+ * showing, nothing typed in the prompt box, and `every` minutes since the data and the last ask.
+ */
+async function isRefreshDue(
+  $: Engine,
+  o: { every: number; dayStart: number; dayEnd: number; lastAsked: number },
+): Promise<boolean> {
+  const now = nowMinutes()
+  if (now < o.dayStart || now >= o.dayEnd) return false
+  if (Date.now() - o.lastAsked < o.every * 60_000) return false
+  const [s, panes, box] = await Promise.all([read($, snapshot), $.ui.panes(), $.prompt.read()])
+  if (s.isDemo || box.text.trim() || !panes.some(p => p.id === PANE && p.isPlaced)) return false
+  return (ageOf(s) ?? Infinity) >= o.every
 }
 
 const HELP = ([
@@ -186,18 +300,32 @@ const HELP = ([
 
 export const register: Register = (on, options) => {
   const sources = String(options.sources ?? '').trim()
-  const dayStart = minutes(String(options.dayStart ?? '09:00')) ?? 9 * 60
-  const dayEnd = minutes(String(options.dayEnd ?? '18:00')) ?? 18 * 60
-  const count = (v: unknown, fallback: number, max: number) => {
+  const start = minutes(String(options.dayStart ?? '')) ?? DEFAULT_START
+  const end = minutes(String(options.dayEnd ?? '')) ?? DEFAULT_END
+  // Overnight ranges are not supported; an end before the start falls back to the defaults.
+  const isDayValid = end > start
+  const [dayStart, dayEnd] = isDayValid ? [start, end] : [DEFAULT_START, DEFAULT_END]
+  // A whole number from the settings, clamped to [min, max]; unset or invalid gives the fallback.
+  // With `canBeOff`, 0 means off and stays 0.
+  const count = (v: unknown, fallback: number, max: number, min = 1, canBeOff = false) => {
     const n = Math.round(Number(v))
-    return Number.isFinite(n) && n >= 1 ? Math.min(n, max) : fallback
+    if (String(v ?? '').trim() === '' || !Number.isFinite(n) || n < 0) return fallback
+    if (n === 0) return canBeOff ? 0 : fallback
+    return Math.min(max, Math.max(min, n))
   }
   const focusCount = count(options.focusCount, 3, 20)
   const maxTasks = Math.max(focusCount, count(options.maxTasks, 7, 50))
   const maxAlerts = count(options.maxAlerts, 5, 20)
   const maxEvents = count(options.maxEvents, 8, 30)
+  // Off by default; when on, at least 15 minutes apart, so a day stays around 30 requests at most.
+  const autoRefresh = count(options.autoRefresh, 0, 240, 15, true)
+  // 0 turns the stale warning off.
+  const staleAfter = count(options.staleAfter, 60, 24 * 60, 1, true)
+  // On by default: a new session asks for fresh data once, unless it is under 15 minutes old.
+  const refreshOnStart = options.refreshOnStart !== false && options.refreshOnStart !== 'false'
 
-  const palette: Palette = (['theme', 'pastel', 'mono'] as const).find(p => p === options.palette) ?? 'theme'
+  const paletteName = String(options.palette)
+  const palette: Palette = Object.hasOwn(PALETTES, paletteName) ? (paletteName as Palette) : 'calm'
   const base = PALETTES[palette]
   const C: Colors = {
     accent: colorOf(options.colorWorkday) ?? base.accent,
@@ -207,387 +335,491 @@ export const register: Register = (on, options) => {
     ok: base.ok,
   }
 
-  const configText = () =>
-    [
+  const refreshPrompt = (isPaneShown: boolean) => todayPrompt(sources, maxTasks, maxAlerts, isPaneShown)
+
+  const configText = () => {
+    // Label, value, setting keys: the values pad to one width, so the keys line up.
+    const rows: [string, string, string][] = [
+      ['Workday', `${fmt(dayStart)}–${fmt(dayEnd)}`, 'dayStart, dayEnd'],
+      ['Focus shows', `${focusCount} tasks`, 'focusCount'],
+      ['Tasks fetched', `up to ${maxTasks}`, 'maxTasks'],
+      ['Heads-up shows', `${maxAlerts} items`, 'maxAlerts'],
+      ['Timeline shows', `${maxEvents} events`, 'maxEvents'],
+      ['Stale after', staleAfter ? `${staleAfter} min` : 'never', 'staleAfter'],
+      ['Refresh on start', refreshOnStart ? 'on' : 'off', 'refreshOnStart'],
+      ['Auto-refresh', autoRefresh ? `every ${autoRefresh} min, during the workday` : 'off', 'autoRefresh'],
+      ['Preferred sources', sources || 'whatever is connected', 'sources'],
+      ['Palette', palette, 'palette'],
+    ]
+    const LABEL_W = 18
+    const valueW = Math.max(...rows.map(r => r[1].length)) + 3
+    return [
       'workday settings. Change them in /config.',
-      `  Workday           ${fmt(dayStart)}–${fmt(dayEnd)}   (dayStart, dayEnd)`,
-      `  Focus shows       ${focusCount} tasks             (focusCount)`,
-      `  Tasks fetched     up to ${maxTasks}            (maxTasks)`,
-      `  Heads-up shows    ${maxAlerts} items             (maxAlerts)`,
-      `  Timeline shows    ${maxEvents} events            (maxEvents)`,
-      `  Preferred sources ${sources || 'whatever is connected'}   (sources)`,
-      `  Palette           ${palette}             (palette)`,
-      `  Card colors       workday ${C.accent} · timeline ${C.events} · focus ${C.tasks} · heads-up ${C.alerts}`,
-      '                    (colorWorkday, colorTimeline, colorFocus, colorHeadsUp: #hex or a theme name)',
+      ...rows.map(([label, value, keys]) => `  ${label.padEnd(LABEL_W)}${value.padEnd(valueW)}(${keys})`),
+      ...(isDayValid ? [] : ['  ← your workday ends before it starts, using the default']),
+      `  ${'Card colors'.padEnd(LABEL_W)}workday ${C.accent} · timeline ${C.events} · focus ${C.tasks} · heads-up ${C.alerts}`,
+      `  ${' '.repeat(LABEL_W)}(colorWorkday, colorTimeline, colorFocus, colorHeadsUp: #hex or a theme name)`,
     ].join('\n')
+  }
+
+  // The engine refuses a prompt submitted from inside command.run (it would wait on the turn
+  // the command holds). Commands queue their prompt here and turn.complete sends it.
+  const queue: string[] = []
+  // When the last refresh was asked for (ms), so auto-refresh never asks twice in one interval.
+  let lastAsked = 0
+  // A turn is running: auto-refresh waits, so it never drops a prompt into the middle of work.
+  let isBusy = false
+  // session.start can fire again (resume, clear); the minute clock is set up once.
+  let isTicking = false
+  // The same prompt twice in one turn is one request; a second /today must not ask Claude again.
+  const ask = (text: string) => {
+    if (!queue.includes(text)) queue.push(text)
+  }
+
+  on('turn.start', async (_$, e, next) => {
+    isBusy = true
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    isBusy = false
+    for (const text of queue.splice(0)) $.prompt.submit({ text }).catch(() => undefined)
+    return result
+  })
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'today',
-      description: 'Your day in a pane: events, tasks, heads-up',
-      argumentHint: '[on|off|show|hide|demo|config|help] [card]',
-    })
-    await $.command.register({
-      name: 'wrapup',
-      description: 'End-of-day report: done, open, tomorrow, time blocks',
-      argumentHint: '[note]',
-    })
-    await $.tool.register({
-      name: TOOL,
-      description:
-        "Fills the user's Today pane with events, tasks and alerts. Call it after /today.",
-      inputSchema: {
-        type: 'object',
-        properties: { events: itemList, tasks: itemList, alerts: itemList },
-      },
-      isDeferred: false,
-    })
-    // Hidden cards outlive the session.
-    const saved = await $.store.get(STORE_HIDDEN)
-    if (Array.isArray(saved)) {
-      const list = saved.filter((x): x is Section => SECTIONS.includes(x as Section))
-      await update($, hidden, () => list)
+    const [, , , savedHidden, last, isOn] = await Promise.all([
+      $.command.register({
+        name: 'today',
+        description: 'Your day in a pane: events, tasks, heads-up',
+        argumentHint: '[on|off|show|hide|demo|config|help] [card]',
+      }),
+      $.command.register({
+        name: 'wrapup',
+        description: 'End-of-day report: done, open, tomorrow, time blocks',
+        argumentHint: '[note]',
+      }),
+      $.tool.register({
+        name: TOOL,
+        description: "Fills the user's Today pane with events, tasks and alerts. Call it after /today.",
+        inputSchema: {
+          type: 'object',
+          properties: { events: itemList, tasks: itemList, alerts: itemList, lists: listLinks },
+        },
+        isDeferred: false,
+      }),
+      $.store.get(STORE_HIDDEN),
+      loadLast($),
+      $.store.get(STORE_ON),
+    ])
+    // Hidden cards and today's last snapshot outlive the session; yesterday's snapshot does not.
+    const cards = Array.isArray(savedHidden) ? savedHidden.filter((x): x is Section => SECTIONS.includes(x)) : []
+    await Promise.all([
+      update($, hidden, () => cards),
+      last ? update($, snapshot, () => last) : undefined,
+    ])
+    if (isOn === true) void openPane($)
+    // Once a minute: redraw (clock, progress line, age of the data move on), and, when the user
+    // turned auto-refresh on, ask for fresh data if it is due.
+    if (isTicking) return next(e)
+    isTicking = true
+    // Fresh data for a new session, unless the pane was turned off. A moment's wait lets the
+    // session settle; a turn the user starts first wins, the refresh then waits for auto-refresh.
+    if (refreshOnStart && isOn !== false) {
+      $.clock.after(3_000, async () => {
+        if (isBusy || queue.length) return
+        const [s, box] = await Promise.all([read($, snapshot), $.prompt.read()])
+        if (isBusy || box.text.trim() || (ageOf(s) ?? Infinity) < 15) return
+        lastAsked = Date.now()
+        $.prompt.submit({ text: refreshPrompt(true) }).catch(() => undefined)
+      })
     }
-    // Today's last snapshot comes back in a new session; yesterday's does not.
-    const last = (await $.store.get(STORE_LAST)) as { date?: string; snapshot?: Snapshot } | undefined
-    if (last?.date === todayKey() && last.snapshot?.updatedAt) {
-      const saved = last.snapshot
-      await update($, snapshot, () => saved)
-    }
-    if ((await $.store.get(STORE_ON)) === true) void $.ui.open({ id: PANE, title: 'Today' })
+    $.clock.every(60_000, async () => {
+      $.ui.invalidate('ui.render')
+      if (!autoRefresh || queue.length || isBusy) return
+      if (!(await isRefreshDue($, { every: autoRefresh, dayStart, dayEnd, lastAsked }))) return
+      // A turn may have started during the awaits.
+      if (isBusy) return
+      lastAsked = Date.now()
+      // A refused submit is retried by the next due tick; nothing to report in the pane.
+      $.prompt.submit({ text: refreshPrompt(true) }).catch(() => undefined)
+    })
 
     return next(e)
   })
 
   on('command.run', { command: 'today' }, async ($, e) => {
     const [verb = '', arg = ''] = e.args.trim().toLowerCase().split(/\s+/)
-    const open = () => $.ui.open({ id: PANE, title: 'Today' })
 
-    if (verb === 'help') return { text: HELP }
-    if (verb === 'config') return { text: configText() }
+    switch (verb) {
+      case 'help':
+        return { text: HELP }
+      case 'config':
+        return { text: configText() }
 
-    if (verb === 'on' || verb === 'off') {
-      await $.store.set(STORE_ON, verb === 'on')
-      if (verb === 'off') {
-        await $.ui.close({ id: PANE })
+      case 'on':
+        await Promise.all([$.store.set(STORE_ON, true), openPane($)])
+        return { text: 'On. The pane opens when a session starts, in terminals at least 144 columns wide.' }
+      case 'off':
+        await Promise.all([$.store.set(STORE_ON, false), $.ui.close({ id: PANE })])
         return { text: 'Off. The pane stays closed until you run /today on.' }
-      }
-      await open()
-      return { text: 'On. The pane opens when a session starts, in terminals at least 144 columns wide.' }
-    }
 
-    if (verb === 'hide' || verb === 'show') {
-      if (!arg) {
-        if (verb === 'hide') {
-          await $.ui.close({ id: PANE })
-          return { text: 'Hidden for now. /today show brings it back.' }
+      case 'hide':
+      case 'show': {
+        const isHiding = verb === 'hide'
+        if (!arg) {
+          if (isHiding) await $.ui.close({ id: PANE })
+          else await openPane($)
+          return { text: isHiding ? 'Hidden for now. /today show brings it back.' : 'Shown.' }
         }
-        await open()
-        return { text: 'Shown.' }
+        const section = SECTIONS.find(s => s.replace('-', '') === arg.replace('-', ''))
+        if (!section) return { text: `There is no "${arg}" card. Try ${SECTIONS.join(', ')}.` }
+        const list = await update($, hidden, cur =>
+          isHiding ? [...new Set([...cur, section])] : cur.filter(x => x !== section),
+        )
+        await $.store.set(STORE_HIDDEN, list)
+        return { text: isHiding ? `${section} hidden. /today show ${section} brings it back.` : `${section} is back.` }
       }
-      const section = SECTIONS.find(s => s === arg || s.replace('-', '') === arg.replace('-', ''))
-      if (!section) return { text: `There is no "${arg}" card. Try ${SECTIONS.join(', ')}.` }
-      const list = await update($, hidden, cur =>
-        verb === 'hide' ? [...new Set([...cur, section])] : cur.filter(x => x !== section),
-      )
-      await $.store.set(STORE_HIDDEN, list)
-      await open()
-      return { text: verb === 'hide' ? `${section} hidden. /today show ${section} brings it back.` : `${section} is back.` }
-    }
 
-    if (verb === 'demo') {
-      if (arg === 'off') {
-        // Back to today's real data, as last gathered; no new request.
-        const last = (await $.store.get(STORE_LAST)) as { date?: string; snapshot?: Snapshot } | undefined
-        const real = last?.date === todayKey() && last.snapshot ? last.snapshot : EMPTY
-        await update($, snapshot, () => real)
-        await open()
-        return { text: 'Demo off. This is your data again.' }
+      case 'demo': {
+        if (arg && arg !== 'on' && arg !== 'off') return { text: 'That would be /today demo or /today demo off.' }
+        // Demo off goes back to today's data as last gathered, with no new request.
+        const data = arg === 'off' ? ((await loadLast($)) ?? EMPTY) : demoSnapshot()
+        // A refresh still waiting would overwrite what the person just asked to see.
+        queue.length = 0
+        await Promise.all([update($, snapshot, () => data), openPane($)])
+        return {
+          text: arg === 'off'
+            ? 'Demo off. This is your data again.'
+            : 'Demo on. The pane shows sample data now; /today demo off gets yours back.',
+        }
       }
-      if (arg && arg !== 'on') return { text: 'That would be /today demo or /today demo off.' }
-      await update($, snapshot, () => demoSnapshot())
-      await open()
-      return { text: 'Demo on. The pane shows sample data now; /today demo off gets yours back.' }
+
+      case '':
+      case 'refresh': {
+        lastAsked = Date.now()
+        const { isPlaced } = await openPane($)
+        ask(refreshPrompt(isPlaced))
+        return { text: 'Looking through your tools…' }
+      }
+
+      default:
+        return { text: HELP }
     }
-
-    if (verb && verb !== 'refresh') return { text: HELP }
-
-    await open()
-    void $.prompt.submit({ text: todayPrompt(sources, maxTasks, maxAlerts) })
-    return { text: 'Looking through your tools…' }
   })
 
-  on('command.run', { command: 'wrapup' }, async ($, e) => {
-    void $.prompt.submit({ text: wrapupPrompt(sources, e.args.trim()) })
-
+  on('command.run', { command: 'wrapup' }, async (_$, e) => {
+    ask(wrapupPrompt(sources, e.args.trim()))
     return { text: 'Writing your end-of-day report…' }
   })
 
   on('tool.run', { tool: `mcp__workday__${TOOL}` }, async ($, e) => {
-    const input = e as unknown as Record<string, unknown>
-    const fresh: Snapshot = {
-      events: toItems(input.events).sort(
-        (a, b) => (minutes(a.time) ?? 0) - (minutes(b.time) ?? 0),
-      ),
-      tasks: toItems(input.tasks),
-      alerts: toItems(input.alerts),
-      updatedAt: fmt(nowMinutes()),
-    }
-    await update($, snapshot, () => fresh)
-    await $.store.set(STORE_LAST, { date: todayKey(), snapshot: fresh })
-    void $.ui.open({ id: PANE, title: 'Today' })
-    const count = fresh.events.length + fresh.tasks.length + fresh.alerts.length
+    const fresh = normalize(e as unknown as Record<string, unknown>)
+    await Promise.all([
+      update($, snapshot, () => fresh),
+      $.store.set(STORE_LAST, { date: todayKey(), snapshot: fresh }),
+    ])
+    void openPane($)
+    const total = fresh.events.length + fresh.tasks.length + fresh.alerts.length
 
-    return { result: `Today pane updated (${count} items).` }
+    return { result: `Today pane updated (${total} items).` }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Link, Button } = $.ui.resolve(e)
+    const { Box, Text, Link } = $.ui.resolve(e)
     const [s, off] = await Promise.all([read($, snapshot), read($, hidden)])
-    const isShown = (x: Section) => !off.includes(x)
-    // The body's own width; a wider drawing is cut off at the frame.
-    const W = Math.max(24, e.props.bodyColumns ?? 40)
+    // Some air on both sides; W is the width inside it (a wider drawing is cut off at the frame).
+    const PAD = 2
+    const W = Math.max(20, (e.props.bodyColumns ?? 40) - 2 * PAD)
     const isWide = W >= 110
     const colW = isWide ? Math.floor((W - 2) / 2) : W
+    const nowMin = nowMinutes()
 
-    const now = new Date()
-    const nowMin = now.getHours() * 60 + now.getMinutes()
-    const date = now.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
-
-    const refresh = () => {
-      void $.prompt.submit({ text: todayPrompt(sources, maxTasks, maxAlerts) })
-    }
-
-    // A rounded card in its section's color: title left, a figure right, then the body.
-    const card = (w: number, color: string, title: string, sub: string, right: string, body: RenderChildren) => (
-      <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1} width={w} marginBottom={1}>
+    // A section: a colored label with the title, a figure on the right, the body indented below.
+    const card = (color: string, title: string, sub: RenderChildren, right: string, body: RenderChildren, w = colW) => (
+      <Box flexDirection="column" width={w} marginBottom={1}>
         <Box justifyContent="space-between">
-          <Text wrap="truncate">
-            <Text color={color} bold>{title}</Text>
-            {sub ? <Text color={color}>{` · ${sub}`}</Text> : null}
-          </Text>
+          <Box flexShrink={1}>
+            <Text wrap="truncate">
+              <Text color={color}>▌</Text>
+              <Text backgroundColor={color} color="inverseText" bold>{` ${title} `}</Text>
+            </Text>
+            {sub}
+          </Box>
           <Box flexShrink={0}>
-            <Text dimColor>{right}</Text>
+            <Text color={color}>{right}</Text>
           </Box>
         </Box>
-        {body}
+        <Box paddingLeft={2} paddingRight={1} flexDirection="column">
+          {body}
+        </Box>
       </Box>
     )
 
-    // Column widths shared by every row of one card, so marks, keys, titles and arrows line up.
-    type Cols = { lead: number; key: number }
-    const colsOf = (items: Item[], lead: number): Cols => {
-      const longest = Math.max(0, ...items.map(x => (x.id ? x.id.length : 0)))
-      return { lead, key: longest ? Math.min(longest, 18) + 1 : 0 }
+    // A list of rows whose marks, keys, titles and arrows line up, then "+ N more".
+    // `lead` is the width of the mark column; `mark(x, i)` draws it, `dim(x, i)` fades a row.
+    const list = (
+      items: Item[],
+      total: number,
+      color: string,
+      lead: number,
+      mark: (x: Item, i: number) => RenderChildren,
+      dim: (x: Item, i: number) => boolean = () => false,
+    ) => {
+      const longest = Math.max(0, ...items.map(x => x.id?.length ?? 0))
+      // Long keys (repo#123) are cut in the middle, so the prefix and the number both stay.
+      const keyW = longest ? Math.min(longest, 12) + 1 : 0
+      return (
+        <Box flexDirection="column">
+          {items.map((x, i) => {
+            const isDim = dim(x, i)
+            const title = (
+              <Text dimColor={isDim} wrap="truncate-end">
+                {x.text}
+              </Text>
+            )
+            return (
+              <Box>
+                <Box width={lead} flexShrink={0}>
+                  {mark(x, i)}
+                </Box>
+                {keyW > 0 && (
+                  <Box width={keyW} paddingRight={1} flexShrink={0}>
+                    <Text color={color} bold dimColor={isDim} wrap="truncate-middle">
+                      {x.id ?? ''}
+                    </Text>
+                  </Box>
+                )}
+                <Box flexGrow={1} flexShrink={1}>
+                  {x.url ? <Link href={x.url}>{title}</Link> : title}
+                </Box>
+                <Box width={2} flexShrink={0} justifyContent="flex-end">
+                  <Text dimColor>{x.url ? '↗' : ' '}</Text>
+                </Box>
+              </Box>
+            )
+          })}
+          {total > items.length && (
+            <Box marginLeft={lead + keyW}>
+              <Text dimColor>{`+ ${total - items.length} more`}</Text>
+            </Box>
+          )}
+        </Box>
+      )
     }
 
-    const row = (x: Item, cols: Cols, color: string, lead: RenderChildren, dim = false) => {
-      const title = (
-        <Text dimColor={dim} wrap="truncate-end">
-          {x.text}
-        </Text>
-      )
-      return (
-        <Box>
-          <Box width={cols.lead} flexShrink={0}>
-            {lead}
-          </Box>
-          {cols.key > 0 && (
-            <Box width={cols.key} flexShrink={0}>
-              <Text color={color} bold dimColor={dim} wrap="truncate-end">
-                {x.id ?? ''}
+    // ---- title line: the day on the left, a color key on the right, a rule below
+    const titleBar = (
+      <Box flexDirection="column" marginBottom={1} width={W}>
+        <Box justifyContent="space-between">
+          <Text wrap="truncate">
+            <Text color={C.accent} bold>{greeting(nowMin)}</Text>
+            <Text bold>{`  ${DATE.format(new Date())}`}</Text>
+            <Text dimColor>{`  ${fmt(nowMin)}`}</Text>
+            {s.isDemo ? <Text color={C.accent} bold>{'  · DEMO'}</Text> : null}
+          </Text>
+          {/* The color key only where it fits next to the day; the cards carry their colors anyway. */}
+          {W >= 72 && (
+            <Box flexShrink={0}>
+              <Text>
+                <Text color={C.events}>●</Text>
+                <Text dimColor> events </Text>
+                <Text color={C.tasks}>●</Text>
+                <Text dimColor> tasks </Text>
+                <Text color={C.alerts}>●</Text>
+                <Text dimColor> heads-up</Text>
               </Text>
             </Box>
           )}
-          <Box flexGrow={1} flexShrink={1}>
-            {x.url ? <Link href={x.url}>{title}</Link> : title}
-          </Box>
-          <Box width={2} flexShrink={0} justifyContent="flex-end">
-            <Text dimColor>{x.url ? '↗' : ' '}</Text>
-          </Box>
         </Box>
-      )
-    }
-
-    const more = (n: number, cols: Cols) =>
-      n > 0 ? (
-        <Box marginLeft={cols.lead + cols.key}>
-          <Text dimColor>{`+ ${n} more`}</Text>
-        </Box>
-      ) : null
-
-    // ---- title bar with a legend
-    const titleBar = (
-      <Box flexDirection="column" alignItems="center" marginBottom={1} width={W}>
-        <Text wrap="truncate">
-          <Text bold>TODAY</Text>
-          <Text dimColor>{' · '}</Text>
-          <Text color={C.accent} bold>{date}</Text>
-          <Text dimColor>{` · ${fmt(nowMin)}`}</Text>
-          {s.isDemo ? <Text color={C.accent} bold>{'  DEMO'}</Text> : null}
-        </Text>
-        <Text>
-          <Text color={C.events}>■</Text>
-          <Text dimColor> events  </Text>
-          <Text color={C.tasks}>■</Text>
-          <Text dimColor> tasks  </Text>
-          <Text color={C.alerts}>■</Text>
-          <Text dimColor> heads-up</Text>
-        </Text>
+        <Text dimColor>{'┄'.repeat(W)}</Text>
       </Box>
     )
 
+    // ---- events: past, next, later (all-day ones have no start and are never past)
+    const isPast = (x: Item) => x.start !== undefined && x.start < nowMin
+    const nextIdx = s.events.findIndex(x => x.start !== undefined && x.start >= nowMin)
+    const next = s.events[nextIdx]
+
     // ---- workday: the day's progress and what comes next
-    const span = Math.max(1, dayEnd - dayStart)
-    const done = Math.min(span, Math.max(0, nowMin - dayStart))
-    const pct = Math.round((done / span) * 100)
-    const g = gauge(pct, Math.max(6, Math.min(20, colW - 16)))
-    const nextIdx = s.events.findIndex(x => (minutes(x.time) ?? 0) >= nowMin)
-    const next = nextIdx >= 0 ? s.events[nextIdx] : undefined
-    const inMin = next ? (minutes(next.time) ?? nowMin) - nowMin : 0
-    const nextText = next
-      ? `next ${next.time} ${next.text} · in ${inMin >= 60 ? `${Math.floor(inMin / 60)}h ${inMin % 60}m` : `${inMin}m`}`
-      : s.events.length
-        ? 'no more events today'
-        : 'no events today'
-    const status = nowMin >= dayEnd ? '○ off' : nowMin < dayStart ? '○ not yet' : '● on'
-    const workday = (w: number) =>
+    const span = dayEnd - dayStart
+    const pct = Math.round((Math.min(span, Math.max(0, nowMin - dayStart)) / span) * 100)
+    const [doneBar, restBar] = bar(pct, Math.max(6, Math.min(24, colW - 12)))
+    let nextText = 'no events today'
+    if (next?.start !== undefined) nextText = `next ${next.time} ${next.text} · in ${until(next.start - nowMin)}`
+    else if (s.events.length) nextText = 'no more events today'
+    let status = '● on'
+    if (nowMin >= dayEnd) status = '○ off'
+    else if (nowMin < dayStart) status = '○ not yet'
+    const workday = (w = colW) =>
       card(
-        w,
         C.accent,
         'WORKDAY',
-        `${fmt(dayStart)}–${fmt(dayEnd)}`,
+        <Text color={C.accent} wrap="truncate">{`  ${fmt(dayStart)}–${fmt(dayEnd)}`}</Text>,
         status,
         <Box flexDirection="column">
           <Text>
-            <Text color={C.accent}>{g.on}</Text>
-            <Text dimColor>{g.off}</Text>
-            <Text bold>{`  ${pct}%`}</Text>
+            <Text color={C.accent}>{doneBar}</Text>
+            <Text dimColor>{restBar}</Text>
+            <Text bold>{` ${pct}%`}</Text>
           </Text>
           <Text dimColor={!next} wrap="truncate-end">
             {nextText}
           </Text>
         </Box>,
+        w,
       )
 
-    // ---- timeline: past dim, the next one bold, the rest plain
-    // A window of maxEvents around now: one past event for context, then what comes next.
-    const pivot = nextIdx === -1 ? s.events.length : nextIdx
-    const evStart = Math.max(0, Math.min(pivot - 1, s.events.length - maxEvents))
-    const evShown = s.events.slice(evStart, evStart + maxEvents)
-    const evCols = colsOf(evShown, 8)
-    const timeline = (w: number) =>
-      s.events.length === 0
-        ? null
-        : card(
-            w,
+    // ---- timeline: a window of maxEvents, starting with the last event before now
+    const timeline = () => {
+      if (s.events.length === 0) return null
+      const pastCount = s.events.filter(isPast).length
+      const from = Math.max(0, Math.min(pastCount - 1, s.events.length - maxEvents))
+      const shown = s.events.slice(from, from + maxEvents)
+      const hereNext = nextIdx - from
+      return card(
+        C.events,
+        'TIMELINE',
+        null,
+        `${s.events.length} event${s.events.length === 1 ? '' : 's'}`,
+        <Box flexDirection="column">
+          {from > 0 && <Text dimColor>{`${' '.repeat(8)}${from} earlier`}</Text>}
+          {list(
+            shown,
+            s.events.length - from,
             C.events,
-            'TIMELINE',
-            '',
-            `${s.events.length} event${s.events.length === 1 ? '' : 's'}`,
-            <Box flexDirection="column">
-              {evStart > 0 && <Text dimColor>{`${' '.repeat(8)}${evStart} earlier`}</Text>}
-              {evShown.map((x, j) => {
-                const i = evStart + j
-                const isPast = nextIdx === -1 || i < nextIdx
-                const isNext = i === nextIdx
-                const mark = isPast ? '✓' : isNext ? '▶' : '◇'
-                return row(
-                  x,
-                  evCols,
-                  C.events,
-                  <Text dimColor={isPast} bold={isNext} color={isNext ? C.events : undefined}>
-                    {`${(x.time ?? '--:--').padEnd(5)} ${mark}`}
-                  </Text>,
-                  isPast,
-                )
-              })}
-              {more(s.events.length - evStart - evShown.length, evCols)}
-            </Box>,
-          )
+            8,
+            (x, i) => {
+              const isNext = i === hereNext
+              const mark = isPast(x) ? '✓' : isNext ? '▶' : '◇'
+              return (
+                <Text dimColor={isPast(x)} bold={isNext} color={isNext ? C.events : undefined}>
+                  {`${(x.time ?? '--:--').padEnd(5)} ${mark}`}
+                </Text>
+              )
+            },
+            isPast,
+          )}
+        </Box>,
+      )
+    }
+
+    // The trackers behind the tasks, each a link to its list of open items when Claude sent one.
+    const trackerLinks = () => {
+      const names = [...new Set(s.tasks.map(x => x.source).filter((x): x is string => !!x))]
+      if (!names.length) return null
+      return (
+        <Box marginLeft={2} flexShrink={1}>
+          {names.map((name, i) => {
+            const url = s.lists?.find(l => l.source === name)?.url
+            const label = <Text color={C.tasks} wrap="truncate">{name}</Text>
+            return (
+              <Box flexShrink={1}>
+                {i > 0 ? <Text color={C.tasks}>{' · '}</Text> : null}
+                {url ? <Link href={url}>{label}</Link> : label}
+              </Box>
+            )
+          })}
+        </Box>
+      )
+    }
 
     // ---- focus: top tasks, numbered
-    const focus = s.tasks.slice(0, focusCount)
-    const taskCols = colsOf(focus, 3)
-    const tasks = (w: number) =>
+    const tasks = () =>
       card(
-        w,
         C.tasks,
         'FOCUS',
-        s.tasks[0]?.source ?? '',
+        trackerLinks(),
         `${s.tasks.length} open`,
         s.tasks.length === 0 ? (
           <Text dimColor>nothing open</Text>
         ) : (
-          <Box flexDirection="column">
-            {focus.map((x, i) => row(x, taskCols, C.tasks, <Text color={C.tasks} bold>{String(i + 1)}</Text>))}
-            {more(s.tasks.length - focus.length, taskCols)}
-          </Box>
+          list(s.tasks.slice(0, focusCount), s.tasks.length, C.tasks, 3, (_x, i) => (
+            <Text color={C.tasks} bold>{String(i + 1)}</Text>
+          ))
         ),
       )
 
     // ---- heads-up: red with items, green when quiet
-    const alertsShown = s.alerts.slice(0, maxAlerts)
-    const alertCols = colsOf(alertsShown, 2)
-    const headsUp = (w: number) =>
-      s.alerts.length === 0
-        ? card(w, C.ok, 'HEADS-UP', '', '0', <Text color={C.ok}>✓ all quiet</Text>)
-        : card(
-            w,
-            C.alerts,
-            'HEADS-UP',
-            '',
-            String(s.alerts.length),
-            <Box flexDirection="column">
-              {alertsShown.map(x => row(x, alertCols, C.alerts, <Text color={C.alerts} bold>⚠</Text>))}
-              {more(s.alerts.length - alertsShown.length, alertCols)}
-            </Box>,
-          )
+    const headsUp = () => {
+      const isQuiet = s.alerts.length === 0
+      return card(
+        isQuiet ? C.ok : C.alerts,
+        'HEADS-UP',
+        null,
+        String(s.alerts.length),
+        isQuiet ? (
+          <Text color={C.ok}>✓ all quiet</Text>
+        ) : (
+          list(s.alerts.slice(0, maxAlerts), s.alerts.length, C.alerts, 2, () => (
+            <Text color={C.alerts} bold>⚠</Text>
+          ))
+        ),
+      )
+    }
 
+    // How old the data is; past `staleAfter` minutes the note turns into a warning.
+    const age = ageOf(s)
+    const isStale = staleAfter > 0 && age !== undefined && age >= staleAfter
+    let ageText = ''
+    if (age !== undefined) ageText = age < 1 ? 'updated just now' : `updated ${until(age)} ago`
+    if (isStale && age !== undefined) ageText = `⚠ ${until(age)} old · stale`
+    // Minutes until auto-refresh asks again; undefined when it is off, outside the workday, or in demo.
+    const isWorkTime = nowMin >= dayStart && nowMin < dayEnd
+    const nextAuto =
+      autoRefresh && isWorkTime && !s.isDemo && age !== undefined
+        ? Math.max(0, Math.ceil(autoRefresh - Math.min(age, (Date.now() - lastAsked) / 60_000)))
+        : undefined
     const hiddenNote = off.length ? ` · hidden: ${off.join(', ')}` : ''
     const footer = (
       <Box justifyContent="space-between" width={W}>
-        <Button label="↻ Refresh" onPress={refresh} />
-        <Text dimColor wrap="truncate-start">
-          {(s.updatedAt ? `updated ${s.updatedAt}` : '') + hiddenNote}
+        {/* No refresh button: Enter in a focused pane would press it, and each press costs a request. */}
+        <Text dimColor={!isStale} color={isStale ? C.alerts : undefined} bold={isStale}>
+          {nextAuto === undefined ? '/today to refresh' : `next refresh in ${until(nextAuto)}`}
+        </Text>
+        <Text wrap="truncate-start">
+          <Text dimColor={!isStale} color={isStale ? C.alerts : undefined}>{ageText}</Text>
+          <Text dimColor>{hiddenNote}</Text>
         </Text>
       </Box>
     )
 
-    if (!s.updatedAt) {
+    const show = (x: Section, el: () => RenderChildren) => (off.includes(x) ? null : el())
+
+    if (!s.takenAt) {
       return (
-        <Box flexDirection="column">
+        <Box flexDirection="column" paddingX={PAD} paddingTop={1}>
           {titleBar}
-          {isShown('workday') && workday(W)}
-          <Text dimColor>Empty so far. Press Refresh, or run /today demo to see a full pane.</Text>
+          {show('workday', () => workday(W))}
+          <Text dimColor>Empty so far. Run /today, or /today demo to see a full pane.</Text>
           {footer}
         </Box>
       )
     }
 
-    const show = (x: Section, el: RenderChildren) => (isShown(x) ? el : null)
     const body = isWide ? (
       <Box columnGap={2}>
         <Box flexDirection="column" width={colW}>
-          {show('workday', workday(colW))}
-          {show('timeline', timeline(colW))}
+          {show('workday', workday)}
+          {show('timeline', timeline)}
         </Box>
         <Box flexDirection="column" width={colW}>
-          {show('focus', tasks(colW))}
-          {show('heads-up', headsUp(colW))}
+          {show('focus', tasks)}
+          {show('heads-up', headsUp)}
         </Box>
       </Box>
     ) : (
       <Box flexDirection="column">
-        {show('workday', workday(W))}
-        {show('heads-up', headsUp(W))}
-        {show('timeline', timeline(W))}
-        {show('focus', tasks(W))}
+        {show('workday', workday)}
+        {show('heads-up', headsUp)}
+        {show('timeline', timeline)}
+        {show('focus', tasks)}
       </Box>
     )
 
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" paddingX={PAD} paddingTop={1}>
         {titleBar}
         {body}
         {footer}

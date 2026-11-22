@@ -2,6 +2,8 @@
 
 A Today pane for Claude Code, plus a `/wrapup` command for the end of the day.
 
+<img src="docs/today.png" alt="The Today pane with sample data: workday progress, heads-up, timeline and focus cards" width="600">
+
 `/today` asks Claude to look through your calendar, tracker, monitoring and inbox and puts the result in a pane next to the chat: today's events, the tasks on your plate, and anything that needs you now. `/wrapup` writes a short end-of-day report from the same sources and your git log.
 
 It doesn't care which tools you use. The mod only says what to look for, and Claude uses whatever is connected in your session: Linear or Jira, Outlook or Google Calendar, Sentry, GitHub. If a source isn't connected, it's skipped. Neither command changes anything; they only read.
@@ -19,7 +21,9 @@ It doesn't care which tools you use. The mod only says what to look for, and Cla
 | `/today config` | Print the current settings |
 | `/wrapup [note]` | End-of-day report: done, still open, first thing tomorrow, rough time blocks for time tracking |
 
-With `/today on`, a new session shows the last data you gathered that day. It doesn't fetch on its own, since that would cost a request every time you start Claude. Press Refresh when you want new data.
+With `/today on`, a new session shows the last data you gathered that day. It also runs `/today` once by itself, unless that data is under 15 minutes old. This costs one Claude request per session; turn off refresh on start in the settings if you'd rather not. For updates during the day, turn on auto-refresh.
+
+The pane greets you by the time of day: "Good morning", or "Guten Morgen" on a German system.
 
 Claude Code only opens a pane by itself in terminals at least 144 columns wide. In a narrower window, use `/today show`.
 
@@ -34,8 +38,11 @@ Set these in `/config`.
 | Tasks fetched | 7 | Most tasks `/today` will gather |
 | Heads-up: items shown | 5 | Items listed before "+ N more" |
 | Timeline: events shown | 8 | Starts with the last event before now |
+| Stale after (minutes) | 60 | When the pane flags its data as old and suggests `/today`. 0 turns it off |
+| Refresh on start | on | Each new session runs `/today` once by itself, unless the data is under 15 minutes old or the pane is turned off with `/today off`. One Claude request per session |
+| Auto-refresh (minutes) | 0 | 0 is off. Otherwise `/today` runs by itself every N minutes, at least 15. Only during the workday, with the pane on screen, no demo showing and nothing typed in the prompt. Each run is one Claude request and adds to the conversation |
 | Preferred sources | empty | For example "Jira, Teams". Empty means whatever is connected |
-| Palette | theme | `theme` follows your Claude Code theme, light or dark. `pastel` and `mono` are fixed |
+| Palette | calm | `calm` (teal, indigo, amber, coral), `nordic`, `warm`, `theme` (follows your Claude Code theme) or `mono` |
 | Color: Workday / Timeline / Focus / Heads-up | empty | A hex value like `#ff8800` or a theme name like `success`. Overrides the palette for that card |
 
 Reports come out in whatever language you use with Claude.
@@ -57,12 +64,6 @@ claude plugin install workday --marketplace mmohrx/workday
 In the desktop app: click + next to the prompt box, then Plugins, Add marketplace with `mmohrx/workday`, then Add plugin.
 
 Answer `y` to add the marketplace, then pick a scope. User scope means every session.
-
-The repository is private for now. To install, you need read access on GitHub and a git login for github.com on your machine: an SSH key, or `gh auth login` followed by `gh auth setup-git`.
-
-## Credits
-
-The card layout and the segmented bars borrow from [claude-flightdeck](https://github.com/scasella/claude-flightdeck) (MIT).
 
 ## License
 
