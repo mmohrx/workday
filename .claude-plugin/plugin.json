@@ -55,7 +55,7 @@
     "refreshOnStart": {
       "type": "boolean",
       "title": "Refresh on start",
-      "description": "On by default: every new session runs /today once on its own, unless the data is less than 15 minutes old or the pane is turned off. Each run is one Claude request.",
+      "description": "On by default: every new start of Claude Code runs /today once on its own (reloading plugins does not), unless the data is less than 15 minutes old or the pane is turned off. Each run is one Claude request.",
       "default": true
     },
     "autoRefresh": {

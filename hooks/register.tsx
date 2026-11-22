@@ -12,6 +12,8 @@ const SECTIONS: readonly Section[] = ['workday', 'timeline', 'focus', 'heads-up'
 const STORE_HIDDEN = 'hidden-sections'
 const STORE_ON = 'open-on-start'
 const STORE_LAST = 'last-snapshot'
+// The Claude Code process that last got a start refresh: a reload in the same process gets none.
+const STORE_STARTED = 'start-refresh-pid'
 const DEFAULT_START = 9 * 60
 const DEFAULT_END = 18 * 60
 
@@ -431,7 +433,16 @@ export const register: Register = (on, options) => {
     if (refreshOnStart && isOn !== false) {
       $.clock.after(3_000, async () => {
         if (isBusy || queue.length) return
-        const [s, box] = await Promise.all([read($, snapshot), $.prompt.read()])
+        const [s, box, pid, env] = await Promise.all([
+          read($, snapshot),
+          $.prompt.read(),
+          $.store.get(STORE_STARTED),
+          $.process.hookEnv().catch(() => ({}) as Record<string, string>),
+        ])
+        // Same process as the last start refresh: a reload of the mod, not a new start.
+        const now = env.CLAUDE_PID
+        if (now && pid === now) return
+        if (now) await $.store.set(STORE_STARTED, now)
         if (isBusy || box.text.trim() || (ageOf(s) ?? Infinity) < 15) return
         lastAsked = Date.now()
         $.prompt.submit({ text: refreshPrompt(true) }).catch(() => undefined)

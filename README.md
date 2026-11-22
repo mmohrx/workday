@@ -39,7 +39,7 @@ Set these in `/config`.
 | Heads-up: items shown | 5 | Items listed before "+ N more" |
 | Timeline: events shown | 8 | Starts with the last event before now |
 | Stale after (minutes) | 60 | When the pane flags its data as old and suggests `/today`. 0 turns it off |
-| Refresh on start | on | Each new session runs `/today` once by itself, unless the data is under 15 minutes old or the pane is turned off with `/today off`. One Claude request per session |
+| Refresh on start | on | Each start of Claude Code runs `/today` once by itself (`/clear` and reloading plugins don't), unless the data is under 15 minutes old or the pane is turned off with `/today off`. One Claude request per session |
 | Auto-refresh (minutes) | 0 | 0 is off. Otherwise `/today` runs by itself every N minutes, at least 15. Only during the workday, with the pane on screen, no demo showing and nothing typed in the prompt. Each run is one Claude request and adds to the conversation |
 | Preferred sources | empty | For example "Jira, Teams". Empty means whatever is connected |
 | Palette | calm | `calm` (teal, indigo, amber, coral), `nordic`, `warm`, `theme` (follows your Claude Code theme) or `mono` |
