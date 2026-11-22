@@ -1,0 +1,86 @@
+{
+  "name": "workday",
+  "version": "0.1.0",
+  "description": "A Today pane with your events, tasks and alerts, and a /wrapup report at the end of the day. Works with whatever tools are connected.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "sources": {
+      "type": "string",
+      "title": "Preferred sources",
+      "description": "Which tools to use, for example 'Jira, Google Calendar, Sentry'. Leave empty to use whatever is connected.",
+      "default": ""
+    },
+    "dayStart": {
+      "type": "string",
+      "title": "Workday start",
+      "description": "HH:MM. Start of the progress bar.",
+      "default": "09:00"
+    },
+    "dayEnd": {
+      "type": "string",
+      "title": "Workday end",
+      "description": "HH:MM. End of the progress bar.",
+      "default": "18:00"
+    },
+    "focusCount": {
+      "type": "number",
+      "title": "Focus: tasks shown",
+      "description": "Tasks listed in the Focus card before '+ N more' (1–20).",
+      "default": 3
+    },
+    "maxTasks": {
+      "type": "number",
+      "title": "Tasks fetched",
+      "description": "Most open tasks /today will gather (1–50).",
+      "default": 7
+    },
+    "maxAlerts": {
+      "type": "number",
+      "title": "Heads-up: items shown",
+      "description": "Heads-up items listed before '+ N more' (1–20).",
+      "default": 5
+    },
+    "maxEvents": {
+      "type": "number",
+      "title": "Timeline: events shown",
+      "description": "Events in the Timeline card (1–30). It starts with the last event before now.",
+      "default": 8
+    },
+    "palette": {
+      "type": "string",
+      "title": "Palette",
+      "description": "theme follows your Claude Code theme. pastel and mono are fixed colors.",
+      "options": [
+        "theme",
+        "pastel",
+        "mono"
+      ],
+      "default": "theme"
+    },
+    "colorWorkday": {
+      "type": "string",
+      "title": "Color: Workday card",
+      "description": "A hex value like #ff8800 or a theme name like success, warning, claude. Leave empty to use the palette.",
+      "default": ""
+    },
+    "colorTimeline": {
+      "type": "string",
+      "title": "Color: Timeline card",
+      "description": "A hex value like #ff8800 or a theme name like success, warning, claude. Leave empty to use the palette.",
+      "default": ""
+    },
+    "colorFocus": {
+      "type": "string",
+      "title": "Color: Focus card",
+      "description": "A hex value like #ff8800 or a theme name like success, warning, claude. Leave empty to use the palette.",
+      "default": ""
+    },
+    "colorHeadsUp": {
+      "type": "string",
+      "title": "Color: Heads-up card",
+      "description": "A hex value like #ff8800 or a theme name like success, warning, claude. Leave empty to use the palette.",
+      "default": ""
+    }
+  },
+  "license": "MIT"
+}
