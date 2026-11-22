@@ -4,7 +4,7 @@ A Today pane for Claude Code, plus a `/wrapup` command for the end of the day.
 
 <img src="docs/today.png" alt="The Today pane with sample data: workday progress, heads-up, timeline and focus cards" width="600">
 
-`/today` asks Claude to look through your calendar, tracker, monitoring and inbox and puts the result in a pane next to the chat: today's events, the tasks on your plate, and anything that needs you now. `/wrapup` writes a short end-of-day report from the same sources and your git log.
+`/today` asks Claude to look through your calendar, tracker, monitoring and inbox and puts the result in a pane next to the chat: today's events, the tasks on your plate, and anything that needs you now. `/wrapup` writes a short end-of-day report from the same sources and your commits of the day: from your code hosting account (GitHub, GitLab, Bitbucket), wherever the repositories live, and from local git in the folders you worked in with Claude today, for commits not pushed yet.
 
 It doesn't care which tools you use. The mod only says what to look for, and Claude uses whatever is connected in your session: Linear or Jira, Outlook or Google Calendar, Sentry, GitHub. If a source isn't connected, it's skipped. Neither command changes anything; they only read.
 

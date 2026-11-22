@@ -223,3 +223,17 @@ test('refresh on start can be turned off', { options: { refreshOnStart: false } 
   const config = await $.command.run({ command: 'today', args: 'config' } as never)
   expect(config.text).toMatch(/Refresh on start\s+off/)
 })
+
+test('/wrapup asks for commits from the hosting account and from local git', async ($, on) => {
+  const prompts: string[] = []
+  on('prompt.submit', (_, e) => {
+    prompts.push((e as { text: string }).text)
+    return { drop: 'captured by the test' } as never
+  })
+  on('turn.complete', () => ({ text: '' }) as never)
+  await $.command.run({ command: 'wrapup', args: '' } as never)
+  await $.turn.complete({ answer: '', durationMs: 0, isAborted: false, turnId: 't', reason: 'answer' })
+  expect(prompts).toHaveLength(1)
+  expect(prompts[0]).toContain('code hosting')
+  expect(prompts[0]).toContain('Claude Code sessions today')
+})
