@@ -29,6 +29,8 @@ The pane greets you by the time of day: "Good morning", or "Guten Morgen" on a G
 
 Claude Code only opens a pane by itself in terminals at least 144 columns wide. In a narrower window, use `/today show`.
 
+In VS Code and the desktop app, nothing happens on its own: no pane at start and no refresh on start. Run `/today` there when you want it.
+
 ## Settings
 
 Set these in `/config`.

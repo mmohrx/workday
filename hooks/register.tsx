@@ -265,6 +265,12 @@ function demoSnapshot(): Snapshot {
 
 const openPane = ($: Engine) => $.ui.open({ id: PANE, title: 'Today' })
 
+/**
+ * Whether a terminal draws this session. Unasked, the pane opens and refreshes run only there:
+ * an IDE or the desktop app shows nothing until the user runs /today themselves.
+ */
+const inTerminal = async ($: Engine) => (await $.session.surfaces()).includes('terminal')
+
 /** Today's last real snapshot from the store, or undefined when it is from another day. */
 async function loadLast($: Engine): Promise<Snapshot | undefined> {
   const last = (await $.store.get(STORE_LAST)) as { date?: string; snapshot?: Snapshot } | undefined
@@ -470,20 +476,21 @@ export const register: Register = (on, options) => {
       loadLast($),
       $.store.get(STORE_ON),
     ])
+    const isTerminal = await inTerminal($)
     // Hidden cards and today's last snapshot outlive the session; yesterday's snapshot does not.
     const cards = Array.isArray(savedHidden) ? savedHidden.filter((x): x is Section => SECTIONS.includes(x)) : []
     await Promise.all([
       update($, hidden, () => cards),
       last ? update($, snapshot, () => last) : undefined,
     ])
-    if (isOn === true) void openPane($)
+    if (isOn === true && isTerminal) void openPane($)
     // Once a minute: redraw (clock, progress line, age of the data move on), and, when the user
     // turned auto-refresh on, ask for fresh data if it is due.
     if (isTicking) return next(e)
     isTicking = true
-    // Fresh data for a new session, unless the pane was turned off. A moment's wait lets the
-    // session settle; a turn the user starts first wins, the refresh then waits for auto-refresh.
-    if (refreshOnStart && isOn !== false) {
+    // Fresh data for a new session in a terminal, unless the pane was turned off. A moment's wait
+    // lets the session settle; a turn the user starts first wins, the refresh then waits for auto-refresh.
+    if (refreshOnStart && isOn !== false && isTerminal) {
       $.clock.after(3_000, async () => {
         if (queue.length) return
         const [s, pid, env] = await Promise.all([
@@ -585,7 +592,8 @@ export const register: Register = (on, options) => {
       update($, snapshot, () => fresh),
       $.store.set(STORE_LAST, { date: todayKey(), snapshot: fresh }),
     ])
-    void openPane($)
+    // In an IDE the pane only shows when the user opened it with /today.
+    if (await inTerminal($)) void openPane($)
     const total = fresh.events.length + fresh.tasks.length + fresh.alerts.length
 
     return { result: `Today pane updated (${total} items).` }

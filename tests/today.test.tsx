@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const PANE = {
   plugin: 'workday',
@@ -312,4 +312,35 @@ test('/today falls back to the chat when no background agent can start', async (
   expect(r.text).toContain('Looking')
   await $.turn.complete({ answer: '', durationMs: 0, isAborted: false, turnId: 't', reason: 'answer' })
   expect(prompts).toHaveLength(1)
+})
+
+test('outside a terminal nothing opens or refreshes unasked', async ($, on) => {
+  const opened: string[] = []
+  const spawned: string[] = []
+  on('command.register', () => ({ value: { command: 'x' } }))
+  on('tool.register', (_, e) => ({ value: e as never }))
+  on('ui.open', (_, e) => {
+    opened.push((e as { id: string }).id)
+    return { value: { isPlaced: true } }
+  })
+  on('agent.spawn', (_, e) => {
+    spawned.push((e as { prompt: string }).prompt)
+    return { model: 'test', agentId: 'a1' } as never
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', () => ({ drop: 'captured by the test' }) as never)
+  on('session.surfaces', () => ({ value: ['vscode'] }) as never)
+  mock.store(on, { 'open-on-start': true })
+  const clock = mock.clock(on, { now: Date.now() })
+
+  await $.session.start({ cwd: '/', surface: 'vscode', isInteractive: true })
+  await clock.advance(5_000)
+  await $.tool.call({ tool: 'mcp__workday__update_today', events: [{ text: 'Weekly', time: '10:00' }] } as never)
+  expect(opened).toHaveLength(0)
+  expect(spawned).toHaveLength(0)
+
+  // Asked with /today, the pane opens here too.
+  await $.command.run({ command: 'today', args: '' } as never)
+  expect(opened).toEqual(['today'])
+  expect(spawned).toHaveLength(1)
 })
