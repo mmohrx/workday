@@ -92,6 +92,7 @@ function todayPrompt(sources: string, maxTasks: number, maxAlerts: number, isPan
     '- Inbox and code review: only things where someone waits for me (a question, a requested change, a review). Skip pure notifications such as "merged" or "pushed".',
     `Monitoring, inbox and code review together go into heads-up: at most ${maxAlerts * 2} items, most urgent first.`,
     'Give every item its key (`id`) and a `url` that opens it, wherever the tool returns one.',
+    'A pull request or review gets `repo#number` as `id`; if the notification lacks the number, look it up with whatever code hosting access you have, and leave `id` empty rather than guess. A monitoring item gets the name of the site or customer, not an internal numeric ID.',
     'For each tracker in tasks, add to `lists` a link that shows my open items there (a saved filter or search URL), if the tool can build one.',
     'Skip any source that is not connected, without asking. Read only, change nothing.',
     sourcesHint(sources),
@@ -537,6 +538,10 @@ export const register: Register = (on, options) => {
     const total = fresh.events.length + fresh.tasks.length + fresh.alerts.length
 
     return { result: `Today pane updated (${total} items).` }
+  }).catch((_$, _e, next) => {
+    // Say so instead of failing silently: Claude then tells the user the pane is not up to date.
+    const why = next.error.kind === 'timeout' ? 'it took too long' : (next.error.message ?? 'unknown error')
+    return { result: `Today pane could not be saved: ${why}` }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

@@ -2,6 +2,9 @@
   "name": "workday",
   "version": "0.1.0",
   "description": "A Today pane with your events, tasks and alerts, and a /wrapup report at the end of the day. Works with whatever tools are connected.",
+  "author": {
+    "name": "mmohrx"
+  },
   "types": "./types/index.d.ts",
   "userConfig": {
     "sources": {

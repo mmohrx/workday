@@ -1,5 +1,13 @@
 {
   "name": "workday",
-  "owner": { "name": "mmohrx" },
-  "plugins": [{ "name": "workday", "source": "./" }]
+  "owner": {
+    "name": "mmohrx"
+  },
+  "description": "The workday plugin: a Today pane for Claude Code and a /wrapup report at the end of the day.",
+  "plugins": [
+    {
+      "name": "workday",
+      "source": "./"
+    }
+  ]
 }

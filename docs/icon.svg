@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#0f172a"/>
+  <!-- sun rising: the start of the day -->
+  <clipPath id="above"><rect x="0" y="0" width="1024" height="560"/></clipPath>
+  <g clip-path="url(#above)">
+    <circle cx="512" cy="560" r="190" fill="#fbbf24"/>
+  </g>
+  <g stroke="#fbbf24" stroke-width="36" stroke-linecap="round">
+    <line x1="512" y1="250" x2="512" y2="310"/>
+    <line x1="292" y1="340" x2="334" y2="382"/>
+    <line x1="732" y1="340" x2="690" y2="382"/>
+    <line x1="212" y1="530" x2="266" y2="530"/>
+    <line x1="812" y1="530" x2="758" y2="530"/>
+  </g>
+  <!-- horizon = the workday progress bar -->
+  <rect x="160" y="600" width="704" height="56" rx="28" fill="#334155"/>
+  <rect x="160" y="600" width="430" height="56" rx="28" fill="#14b8a6"/>
+  <!-- tasks below the horizon -->
+  <rect x="160" y="716" width="420" height="36" rx="18" fill="#818cf8"/>
+  <rect x="160" y="796" width="300" height="36" rx="18" fill="#818cf8" opacity="0.6"/>
+  <circle cx="846" cy="814" r="34" fill="#f87171"/>
+</svg>

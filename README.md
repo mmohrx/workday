@@ -1,3 +1,5 @@
+<img src=".claude-plugin/icon.png" alt="workday icon: a sun rising over the workday progress bar" width="96" align="right">
+
 # workday
 
 A Today pane for Claude Code, plus a `/wrapup` command for the end of the day.
@@ -46,6 +48,18 @@ Set these in `/config`.
 | Color: Workday / Timeline / Focus / Heads-up | empty | A hex value like `#ff8800` or a theme name like `success`. Overrides the palette for that card |
 
 Reports come out in whatever language you use with Claude.
+
+## Requirements
+
+Nothing is required. Whatever is missing just leaves its part of the pane or report empty:
+
+| What | Used for | Without it |
+|---|---|---|
+| Connected tools (calendar, tracker, monitoring, mail) | Everything `/today` shows | That source is skipped |
+| Code hosting access: a connector, or a logged-in CLI such as `gh` or `glab` | Commits and pull requests in `/wrapup`, and the `repo#number` keys on review items in `/today` | No hosted commits in the report, and review items show without a number |
+| `git` | Commits in `/wrapup` that aren't pushed yet | Only pushed commits show up |
+
+`/wrapup` also reads the session files under `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`) to find the folders you worked in today.
 
 ## Install
 

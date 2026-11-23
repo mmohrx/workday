@@ -237,3 +237,30 @@ test('/wrapup asks for commits from the hosting account and from local git', asy
   expect(prompts[0]).toContain('code hosting')
   expect(prompts[0]).toContain('Claude Code sessions today')
 })
+
+test('/today asks for readable keys: repo#number for reviews, a site name for monitoring', async ($, on) => {
+  const prompts: string[] = []
+  on('prompt.submit', (_, e) => {
+    prompts.push((e as { text: string }).text)
+    return { drop: 'captured by the test' } as never
+  })
+  on('turn.complete', () => ({ text: '' }) as never)
+  on('ui.open', () => ({ value: { isPlaced: false, reason: 'no-surface' } }) as never)
+  await $.command.run({ command: 'today', args: '' } as never)
+  await $.turn.complete({ answer: '', durationMs: 0, isAborted: false, turnId: 't', reason: 'answer' })
+  expect(prompts).toHaveLength(1)
+  expect(prompts[0]).toContain('`repo#number`')
+  expect(prompts[0]).toContain('leave `id` empty rather than guess')
+  expect(prompts[0]).toContain('not an internal numeric ID')
+})
+
+test('the tool says so when the pane cannot be saved', async ($, on) => {
+  on('tool.register', (_, e) => ({ value: e as never }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('store.get', () => ({ value: undefined }) as never)
+  on('store.set', () => {
+    throw new Error('disk full')
+  })
+  const r = await $.tool.call({ tool: 'mcp__workday__update_today', tasks: [{ text: 'One' }] } as never)
+  expect(JSON.stringify(r)).toContain('could not be saved')
+})
