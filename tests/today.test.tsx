@@ -170,6 +170,17 @@ test('the title line greets by the time of day', async ($, on) => {
   await ui.unmount()
 })
 
+test('the time of day shows as a sky in front of the greeting, on every surface', async ($, on) => {
+  on('store.get', () => ({ value: undefined }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  await $.command.run({ command: 'today', args: 'demo' } as never)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Text', text: /🌙|🌅|🌞|⛅|🌆/ })).toBeTruthy()
+    await ui.unmount()
+  }
+})
+
 test('tasks from two trackers name both in the focus card', async ($, on) => {
   on('tool.register', (_, e) => ({ value: e as never }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -263,4 +274,42 @@ test('the tool says so when the pane cannot be saved', async ($, on) => {
   })
   const r = await $.tool.call({ tool: 'mcp__workday__update_today', tasks: [{ text: 'One' }] } as never)
   expect(JSON.stringify(r)).toContain('could not be saved')
+})
+
+test('/today with the pane on screen gathers in a background agent, not in the chat', async ($, on) => {
+  const prompts: string[] = []
+  const spawned: string[] = []
+  on('prompt.submit', (_, e) => {
+    prompts.push((e as { text: string }).text)
+    return { drop: 'captured by the test' } as never
+  })
+  on('agent.spawn', (_, e) => {
+    spawned.push((e as { prompt: string }).prompt)
+    return { model: 'test', agentId: 'a1' } as never
+  })
+  on('turn.complete', () => ({ text: '' }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  const r = await $.command.run({ command: 'today', args: '' } as never)
+  expect(r.text).toContain('background')
+  // A second /today while the agent runs starts no second one.
+  await $.command.run({ command: 'today', args: '' } as never)
+  await $.turn.complete({ answer: '', durationMs: 0, isAborted: false, turnId: 't', reason: 'answer' })
+  expect(spawned).toHaveLength(1)
+  expect(spawned[0]).toContain('`repo#number`')
+  expect(prompts).toHaveLength(0)
+})
+
+test('/today falls back to the chat when no background agent can start', async ($, on) => {
+  const prompts: string[] = []
+  on('prompt.submit', (_, e) => {
+    prompts.push((e as { text: string }).text)
+    return { drop: 'captured by the test' } as never
+  })
+  on('agent.spawn', () => ({ deny: 'background tasks are off' }) as never)
+  on('turn.complete', () => ({ text: '' }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  const r = await $.command.run({ command: 'today', args: '' } as never)
+  expect(r.text).toContain('Looking')
+  await $.turn.complete({ answer: '', durationMs: 0, isAborted: false, turnId: 't', reason: 'answer' })
+  expect(prompts).toHaveLength(1)
 })

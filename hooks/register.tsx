@@ -170,14 +170,20 @@ const GREETINGS: Record<string, readonly [night: string, morning: string, noon: 
 const LANG = DATE.resolvedOptions().locale.slice(0, 2)
 const WORDS = GREETINGS[LANG] ?? GREETINGS.en!
 
+/** The part of the day as an index into WORDS and SKY: night, morning, noon, afternoon, evening. */
+function dayPart(min: number): 0 | 1 | 2 | 3 | 4 {
+  const h = Math.floor(min / 60)
+  return h < 5 ? 0 : h < 11 ? 1 : h < 14 ? 2 : h < 18 ? 3 : h < 23 ? 4 : 0
+}
+
 /** "Good morning" by the time of day; late at night "Still up?". */
 function greeting(min: number): string {
-  const h = Math.floor(min / 60)
-  const [night, morning, noon, afternoon, evening] = WORDS
-  const word = h < 5 ? night : h < 11 ? morning : h < 14 ? noon : h < 18 ? afternoon : h < 23 ? evening : night
-  const end = word === night ? '?' : ''
-  return `${word}${end}`
+  const part = dayPart(min)
+  return `${WORDS[part]}${part === 0 ? '?' : ''}`
 }
+
+// A sky for each part of the day, in front of the greeting.
+const SKY = ['🌙', '🌅', '🌞', '⛅', '🌆'] as const
 
 const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
 /** Links are https only; anything else is dropped. */
@@ -274,7 +280,8 @@ function ageOf(s: Snapshot): number | undefined {
 
 /**
  * Whether auto-refresh should ask now: during the workday, with the pane on screen, no demo
- * showing, nothing typed in the prompt box, and `every` minutes since the data and the last ask.
+ * showing, and `every` minutes since the data and the last ask. The refresh runs in a background
+ * agent, so a running turn or text in the prompt box does not hold it back.
  */
 async function isRefreshDue(
   $: Engine,
@@ -283,9 +290,48 @@ async function isRefreshDue(
   const now = nowMinutes()
   if (now < o.dayStart || now >= o.dayEnd) return false
   if (Date.now() - o.lastAsked < o.every * 60_000) return false
-  const [s, panes, box] = await Promise.all([read($, snapshot), $.ui.panes(), $.prompt.read()])
-  if (s.isDemo || box.text.trim() || !panes.some(p => p.id === PANE && p.isPlaced)) return false
+  const [s, panes] = await Promise.all([read($, snapshot), $.ui.panes()])
+  if (s.isDemo || !panes.some(p => p.id === PANE && p.isPlaced)) return false
   return (ageOf(s) ?? Infinity) >= o.every
+}
+
+type RefreshState = {
+  /** When the last refresh was asked for (ms), so auto-refresh never asks twice in one interval. */
+  lastAsked: number
+  /** A turn of the chat is running; a prompt is never dropped into the middle of work. */
+  isBusy: boolean
+  /**
+   * Prompts commands queue: the engine refuses a prompt submitted from inside command.run (it
+   * would wait on the turn the command holds), so turn.complete sends them.
+   */
+  queue: string[]
+  /** The background agent gathering data right now, and when it started. */
+  refreshing?: { agentId: string; since: number }
+}
+
+/**
+ * Gathers fresh data in a background agent, so the chat stays free and nothing waits for the
+ * current turn. False when no agent started (background tasks off, a limit, a refusal).
+ */
+async function refresh($: Engine, st: RefreshState, prompt: string): Promise<boolean> {
+  // One at a time; an agent that never reported back is given up after 10 minutes.
+  if (st.refreshing && Date.now() - st.refreshing.since < 10 * 60_000) return true
+  st.lastAsked = Date.now()
+  const r = await $.agent.spawn({ prompt, description: 'Refresh the Today pane' }).catch(() => undefined)
+  if (!r || 'deny' in r) return false
+  // The engine sets agentId on every agent it started; turn.complete matches the agent's end by it.
+  st.refreshing = { agentId: r.agentId ?? '', since: Date.now() }
+  $.ui.invalidate('ui.render')
+  return true
+}
+
+/** The fallback without a background agent: the refresh as a turn in the chat, when it is idle. */
+async function refreshInChat($: Engine, st: RefreshState, prompt: string) {
+  const box = await $.prompt.read()
+  if (st.isBusy || st.queue.length || box.text.trim()) return
+  st.lastAsked = Date.now()
+  // A refused submit is retried by the next due tick; nothing to report in the pane.
+  $.prompt.submit({ text: prompt }).catch(() => undefined)
 }
 
 const HELP = ([
@@ -367,28 +413,34 @@ export const register: Register = (on, options) => {
     ].join('\n')
   }
 
-  // The engine refuses a prompt submitted from inside command.run (it would wait on the turn
-  // the command holds). Commands queue their prompt here and turn.complete sends it.
-  const queue: string[] = []
-  // When the last refresh was asked for (ms), so auto-refresh never asks twice in one interval.
-  let lastAsked = 0
-  // A turn is running: auto-refresh waits, so it never drops a prompt into the middle of work.
-  let isBusy = false
+  // When the last refresh was asked for, whether the chat is busy, queued prompts, the background refresh.
+  const st: RefreshState = { lastAsked: 0, isBusy: false, queue: [] }
+  const queue = st.queue
   // session.start can fire again (resume, clear); the minute clock is set up once.
   let isTicking = false
   // The same prompt twice in one turn is one request; a second /today must not ask Claude again.
   const ask = (text: string) => {
     if (!queue.includes(text)) queue.push(text)
   }
-
   on('turn.start', async (_$, e, next) => {
-    isBusy = true
+    // A subagent's turn, the refresh's own included, does not make the chat busy.
+    if (!e.agentId) st.isBusy = true
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    isBusy = false
+    if (e.agentId) {
+      if (e.agentId !== st.refreshing?.agentId) return result
+      const { since } = st.refreshing
+      st.refreshing = undefined
+      const s = await read($, snapshot)
+      // The agent ended without filling the pane: say so instead of leaving old data unexplained.
+      if ((s.takenAt ?? 0) < since) $.ui.toast('Today: the refresh brought no new data. /today in the chat shows why.')
+      $.ui.invalidate('ui.render')
+      return result
+    }
+    st.isBusy = false
     for (const text of queue.splice(0)) $.prompt.submit({ text }).catch(() => undefined)
     return result
   })
@@ -433,10 +485,9 @@ export const register: Register = (on, options) => {
     // session settle; a turn the user starts first wins, the refresh then waits for auto-refresh.
     if (refreshOnStart && isOn !== false) {
       $.clock.after(3_000, async () => {
-        if (isBusy || queue.length) return
-        const [s, box, pid, env] = await Promise.all([
+        if (queue.length) return
+        const [s, pid, env] = await Promise.all([
           read($, snapshot),
-          $.prompt.read(),
           $.store.get(STORE_STARTED),
           $.process.hookEnv().catch(() => ({}) as Record<string, string>),
         ])
@@ -444,20 +495,15 @@ export const register: Register = (on, options) => {
         const now = env.CLAUDE_PID
         if (now && pid === now) return
         if (now) await $.store.set(STORE_STARTED, now)
-        if (isBusy || box.text.trim() || (ageOf(s) ?? Infinity) < 15) return
-        lastAsked = Date.now()
-        $.prompt.submit({ text: refreshPrompt(true) }).catch(() => undefined)
+        if ((ageOf(s) ?? Infinity) < 15) return
+        if (!(await refresh($, st, refreshPrompt(true)))) await refreshInChat($, st, refreshPrompt(true))
       })
     }
     $.clock.every(60_000, async () => {
       $.ui.invalidate('ui.render')
-      if (!autoRefresh || queue.length || isBusy) return
-      if (!(await isRefreshDue($, { every: autoRefresh, dayStart, dayEnd, lastAsked }))) return
-      // A turn may have started during the awaits.
-      if (isBusy) return
-      lastAsked = Date.now()
-      // A refused submit is retried by the next due tick; nothing to report in the pane.
-      $.prompt.submit({ text: refreshPrompt(true) }).catch(() => undefined)
+      if (!autoRefresh || queue.length || st.refreshing) return
+      if (!(await isRefreshDue($, { every: autoRefresh, dayStart, dayEnd, lastAsked: st.lastAsked }))) return
+      if (!(await refresh($, st, refreshPrompt(true)))) await refreshInChat($, st, refreshPrompt(true))
     })
 
     return next(e)
@@ -512,8 +558,13 @@ export const register: Register = (on, options) => {
 
       case '':
       case 'refresh': {
-        lastAsked = Date.now()
         const { isPlaced } = await openPane($)
+        // Where the pane shows, a background agent fills it. Where it cannot show, the result
+        // has to be listed in the chat, so the refresh runs there as a turn.
+        if (isPlaced && (await refresh($, st, refreshPrompt(true)))) {
+          return { text: 'Gathering in the background. The pane fills in when it is done.' }
+        }
+        st.lastAsked = Date.now()
         ask(refreshPrompt(isPlaced))
         return { text: 'Looking through your tools…' }
       }
@@ -631,12 +682,18 @@ export const register: Register = (on, options) => {
     const titleBar = (
       <Box flexDirection="column" marginBottom={1} width={W}>
         <Box justifyContent="space-between">
+          <Box flexShrink={1}>
+            {/* The sky of the time of day: a moon at night, a sunrise in the morning, and so on. */}
+            <Box flexShrink={0} marginRight={1}>
+              <Text>{SKY[dayPart(nowMin)]}</Text>
+            </Box>
           <Text wrap="truncate">
             <Text color={C.accent} bold>{greeting(nowMin)}</Text>
             <Text bold>{`  ${DATE.format(new Date())}`}</Text>
             <Text dimColor>{`  ${fmt(nowMin)}`}</Text>
             {s.isDemo ? <Text color={C.accent} bold>{'  · DEMO'}</Text> : null}
           </Text>
+          </Box>
           {/* The color key only where it fits next to the day; the cards carry their colors anyway. */}
           {W >= 72 && (
             <Box flexShrink={0}>
@@ -783,11 +840,12 @@ export const register: Register = (on, options) => {
     let ageText = ''
     if (age !== undefined) ageText = age < 1 ? 'updated just now' : `updated ${until(age)} ago`
     if (isStale && age !== undefined) ageText = `⚠ ${until(age)} old · stale`
+    if (st.refreshing) ageText = 'updating…'
     // Minutes until auto-refresh asks again; undefined when it is off, outside the workday, or in demo.
     const isWorkTime = nowMin >= dayStart && nowMin < dayEnd
     const nextAuto =
       autoRefresh && isWorkTime && !s.isDemo && age !== undefined
-        ? Math.max(0, Math.ceil(autoRefresh - Math.min(age, (Date.now() - lastAsked) / 60_000)))
+        ? Math.max(0, Math.ceil(autoRefresh - Math.min(age, (Date.now() - st.lastAsked) / 60_000)))
         : undefined
     const hiddenNote = off.length ? ` · hidden: ${off.join(', ')}` : ''
     const footer = (
